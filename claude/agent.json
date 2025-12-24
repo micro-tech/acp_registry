@@ -8,7 +8,7 @@
   "license": "proprietary",
   "distribution": {
     "npx": {
-      "package": "@zed-industries/claude-code-acp"
+      "package": "@zed-industries/claude-code-acp@0.12.6"
     }
   }
 }
