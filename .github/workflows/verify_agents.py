@@ -2,6 +2,7 @@
 """Verify all registered agents can be launched in isolated sandboxes.
 
 Sandboxes are created in .sandbox/<dist_type>/<agent_id>/ for easy inspection.
+Supports optional ACP auth verification via --auth-check flag.
 """
 
 import argparse
@@ -17,6 +18,13 @@ import zipfile
 from pathlib import Path
 from typing import NamedTuple
 
+# Import auth client (only needed when --auth-check is used)
+try:
+    from client import AuthCheckResult, run_auth_check
+    HAS_AUTH_CLIENT = True
+except ImportError:
+    HAS_AUTH_CLIENT = False
+
 # Platform detection
 PLATFORM_MAP = {
     ("Darwin", "arm64"): "darwin-aarch64",
@@ -30,6 +38,7 @@ PLATFORM_MAP = {
 DEFAULT_TIMEOUT = 10  # seconds
 STARTUP_GRACE = 2  # seconds to wait before checking if process is alive
 DEFAULT_SANDBOX_DIR = ".sandbox"
+DEFAULT_AUTH_TIMEOUT = 30  # seconds for ACP handshake
 
 
 class Result(NamedTuple):
@@ -309,6 +318,159 @@ def verify_uvx(agent: dict, sandbox: Path, timeout: int, verbose: bool) -> Resul
         return Result(agent_id, "uvx", False, msg[:200])
 
 
+def prepare_binary(agent: dict, sandbox: Path) -> tuple[bool, str]:
+    """Download and extract binary distribution if needed.
+
+    Returns:
+        (success, message) tuple
+    """
+    current_platform = get_current_platform()
+    binary_dist = agent["distribution"].get("binary", {})
+
+    if current_platform not in binary_dist:
+        return False, f"No build for {current_platform}"
+
+    target = binary_dist[current_platform]
+    archive_url = target["archive"]
+
+    # Download (skip if already exists)
+    archive_name = archive_url.split("/")[-1]
+    archive_path = sandbox / archive_name
+    extract_dir = sandbox / "extracted"
+
+    if not archive_path.exists():
+        print(f"    → Downloading from: {archive_url[:80]}...")
+        if not download_file(archive_url, archive_path):
+            return False, "Download failed"
+
+    # Extract (skip if already extracted)
+    if not extract_dir.exists():
+        print(f"    → Extracting archive...")
+        extract_dir.mkdir()
+        if not extract_archive(archive_path, extract_dir):
+            return False, "Extraction failed"
+
+    return True, "Binary prepared"
+
+
+def build_agent_command(agent: dict, dist_type: str, sandbox: Path) -> tuple[list[str], Path, dict[str, str]]:
+    """Build command, working directory, and env for an agent distribution.
+
+    Returns:
+        (cmd, cwd, env) tuple
+    """
+    distribution = agent["distribution"]
+    env: dict[str, str] = {}
+
+    if dist_type == "npx":
+        npx_dist = distribution.get("npx", {})
+        package = npx_dist.get("package", "")
+        args = npx_dist.get("args", [])
+        env = npx_dist.get("env", {})
+        cmd = ["npx", "--prefix", str(sandbox), "--yes", package] + args
+        cwd = sandbox
+    elif dist_type == "uvx":
+        uvx_dist = distribution.get("uvx", {})
+        package = uvx_dist.get("package", "")
+        args = uvx_dist.get("args", [])
+        env = uvx_dist.get("env", {})
+        cache_dir = sandbox / "uv-cache"
+        cache_dir.mkdir(exist_ok=True)
+        cmd = ["uvx", "--cache-dir", str(cache_dir), package] + args
+        cwd = sandbox
+    elif dist_type == "binary":
+        current_platform = get_current_platform()
+        binary_dist = distribution.get("binary", {})
+        target = binary_dist.get(current_platform, {})
+        args = target.get("args", [])
+        env = target.get("env", {})
+        extract_dir = sandbox / "extracted"
+
+        # Find the executable
+        target_cmd = target.get("cmd", "")
+        if target_cmd.startswith("./"):
+            target_cmd = target_cmd[2:]
+
+        if target_cmd in ("node", "python", "python3", "java", "ruby"):
+            exe_path = Path(shutil.which(target_cmd) or target_cmd)
+        else:
+            exe_path = None
+            for path in extract_dir.rglob(target_cmd):
+                exe_path = path
+                break
+            if not exe_path:
+                exe_path = extract_dir / target_cmd
+
+        cmd = [str(exe_path)] + args
+        cwd = extract_dir
+    else:
+        cmd = []
+        cwd = sandbox
+
+    return cmd, cwd, env
+
+
+def verify_auth(
+    agent: dict,
+    dist_type: str,
+    sandbox: Path,
+    auth_timeout: float,
+    verbose: bool,
+) -> Result:
+    """Verify agent supports ACP authentication.
+
+    Args:
+        agent: Agent configuration dict
+        dist_type: Distribution type to test
+        sandbox: Sandbox directory
+        auth_timeout: Timeout for ACP handshake
+        verbose: Enable verbose output
+
+    Returns:
+        Result indicating auth check pass/fail
+    """
+    agent_id = agent["id"]
+
+    if not HAS_AUTH_CLIENT:
+        return Result(agent_id, dist_type, False,
+                      "Auth client not available", skipped=True)
+
+    # For binary distributions, ensure download and extraction first
+    if dist_type == "binary":
+        success, message = prepare_binary(agent, sandbox)
+        if not success:
+            return Result(agent_id, dist_type, False, message, skipped=True)
+
+    # Build command for this distribution
+    cmd, cwd, agent_env = build_agent_command(agent, dist_type, sandbox)
+
+    if not cmd:
+        return Result(agent_id, dist_type, False,
+                      f"Cannot build command for {dist_type}", skipped=True)
+
+    # Create isolated environment with sandbox HOME
+    auth_sandbox = sandbox / "auth-home"
+    auth_sandbox.mkdir(exist_ok=True)
+    env = {
+        "HOME": str(auth_sandbox),
+        **agent_env,
+    }
+
+    if verbose:
+        print(f"    → Auth check: {' '.join(cmd[:3])}...")
+
+    # Run auth check
+    result = run_auth_check(cmd, cwd, env, auth_timeout)
+
+    if result.success:
+        methods_info = ", ".join(
+            f"{m.id}({m.type})" for m in result.auth_methods if m.type
+        )
+        return Result(agent_id, dist_type, True, f"Auth OK: {methods_info}")
+    else:
+        return Result(agent_id, dist_type, False, result.error or "Auth check failed")
+
+
 def verify_agent(
     agent: dict,
     dist_type: str | None,
@@ -316,7 +478,8 @@ def verify_agent(
     verbose: bool,
     sandbox_base: Path,
     clean: bool = False,
-    skip_binary: bool = False,
+    auth_check: bool = False,
+    auth_timeout: float = DEFAULT_AUTH_TIMEOUT,
 ) -> list[Result]:
     """Verify an agent's distributions.
 
@@ -327,7 +490,8 @@ def verify_agent(
         verbose: Enable verbose output
         sandbox_base: Base directory for sandboxes (.sandbox/)
         clean: If True, clean sandbox before running
-        skip_binary: If True, skip binary distribution tests
+        auth_check: If True, run ACP auth verification instead of basic launch test
+        auth_timeout: Timeout for ACP handshake in seconds
     """
     agent_id = agent["id"]
     results = []
@@ -335,10 +499,6 @@ def verify_agent(
 
     # Determine which distributions to test
     dist_types = [dist_type] if dist_type else list(distribution.keys())
-
-    # Skip binary if requested
-    if skip_binary and "binary" in dist_types:
-        dist_types = [d for d in dist_types if d != "binary"]
 
     for dtype in dist_types:
         if dtype not in distribution:
@@ -362,7 +522,10 @@ def verify_agent(
 
         sandbox.mkdir(parents=True, exist_ok=True)
 
-        if dtype == "binary":
+        # Run either auth check (deeper) or basic launch test
+        if auth_check:
+            result = verify_auth(agent, dtype, sandbox, auth_timeout, verbose)
+        elif dtype == "binary":
             result = verify_binary(agent, sandbox, timeout, verbose)
         elif dtype == "npx":
             result = verify_npx(agent, sandbox, timeout, verbose)
@@ -390,7 +553,7 @@ def verify_agent(
 def load_registry(registry_dir: Path) -> list[dict]:
     """Load all agents from registry directory."""
     agents = []
-    skip_dirs = {".claude", ".git", ".github", ".idea", "__pycache__", "dist"}
+    skip_dirs = {".claude", ".git", ".github", ".idea", "__pycache__", "dist", "_not_yet_unsupported"}
 
     for agent_dir in sorted(registry_dir.iterdir()):
         if not agent_dir.is_dir() or agent_dir.name in skip_dirs:
@@ -415,12 +578,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s                          # Verify all agents
+  %(prog)s                          # Verify all agents (basic launch test)
   %(prog)s -a claude-code,gemini    # Verify specific agents (comma-separated)
   %(prog)s -t npx                   # Verify only npx distributions
-  %(prog)s --skip-binary            # Skip slow binary downloads
   %(prog)s --clean                  # Clean sandboxes before running
   %(prog)s --clean-all              # Remove all sandboxes and exit
+  %(prog)s --auth-check             # Verify ACP auth support (deeper test)
 """,
     )
     parser.add_argument("--agent", "-a", help="Verify specific agent IDs (comma-separated)")
@@ -436,12 +599,21 @@ Examples:
                         help="Remove all sandboxes and exit")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="Verbose output")
-    parser.add_argument("--skip-binary", action="store_true",
-                        help="Skip binary distribution tests (downloads can be slow)")
+    parser.add_argument("--auth-check", action="store_true",
+                        help="Verify ACP auth support instead of basic launch test (requires agent-client-protocol)")
+    parser.add_argument("--auth-timeout", type=float, default=DEFAULT_AUTH_TIMEOUT,
+                        help=f"ACP handshake timeout in seconds (default: {DEFAULT_AUTH_TIMEOUT})")
     args = parser.parse_args()
 
     # Always show what's happening
     verbose = True  # Force verbose mode for better visibility
+
+    # Check auth client availability if auth flag is used
+    if args.auth_check and not HAS_AUTH_CLIENT:
+        print("Error: --auth-check/--auth-only requires 'agent-client-protocol' package")
+        print("Install with: pip install agent-client-protocol")
+        print("Or run with: uv run --with agent-client-protocol ...")
+        sys.exit(1)
 
     # Find registry directory
     registry_dir = Path(__file__).parent.parent.parent
@@ -489,8 +661,6 @@ Examples:
     for idx, agent in enumerate(agents, 1):
         agent_id = agent["id"]
         dist_types = list(agent.get("distribution", {}).keys())
-        if args.skip_binary:
-            dist_types = [d for d in dist_types if d != "binary"]
         print(f"[{idx}/{total}] {agent_id} ({', '.join(dist_types)})")
 
         results = verify_agent(
@@ -500,7 +670,8 @@ Examples:
             verbose=verbose,
             sandbox_base=sandbox_base,
             clean=args.clean,
-            skip_binary=args.skip_binary,
+            auth_check=args.auth_check,
+            auth_timeout=args.auth_timeout,
         )
 
         all_results.extend(results)
