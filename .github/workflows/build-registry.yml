@@ -18,8 +18,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  validate:
-    name: Validate
+  build:
+    name: Build & Validate
     runs-on: ubuntu-latest
 
     steps:
@@ -28,21 +28,84 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Validate and build
         run: uv run --with jsonschema .github/workflows/build_registry.py
+
+      - name: Verify agent auth support
+        timeout-minutes: 15
+        run: python3 .github/workflows/verify_agents.py --auth-check
 
       - name: List dist
         run: ls -la dist/
 
       - name: Upload artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: registry
           path: dist/
 
-  publish:
-    name: Publish Release
-    needs: validate
+  upload:
+    name: Upload to S3
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    env:
+      S3_PREFIX: registry/v1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: registry
+          path: dist/
+
+      - name: Configure AWS CLI for R2
+        run: |
+          aws configure set aws_access_key_id "${{ secrets.S3_ACCESS_KEY_ID }}"
+          aws configure set aws_secret_access_key "${{ secrets.S3_SECRET_ACCESS_KEY }}"
+          aws configure set default.region auto
+
+      - name: Generate version string
+        id: version
+        run: echo "version=v$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload versioned snapshot
+        env:
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          aws s3 sync dist/ "s3://${S3_BUCKET}/${S3_PREFIX}/${{ steps.version.outputs.version }}/" \
+            --endpoint-url "${S3_ENDPOINT}" \
+            --cache-control "public, max-age=31536000, immutable"
+
+      - name: Upload to latest
+        env:
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+        run: |
+          aws s3 sync dist/ "s3://${S3_BUCKET}/${S3_PREFIX}/latest/" \
+            --endpoint-url "${S3_ENDPOINT}" \
+            --cache-control "public, max-age=300" \
+            --delete
+
+      - name: Print CDN URLs
+        run: |
+          echo "## Uploaded to S3" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Versioned: \`${S3_PREFIX}/${{ steps.version.outputs.version }}/\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Latest: \`${S3_PREFIX}/latest/\`" >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish GitHub Release
+    needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -63,14 +126,10 @@ jobs:
         run: |
           VERSION="v$(date +%Y.%m.%d)-$(git rev-parse --short HEAD)"
 
-          # Create versioned release (exclude registry-for-jetbrains.json)
           gh release create "$VERSION" \
             --title "Registry $VERSION" \
-            --notes "Auto-generated registry index" \
+            --notes "Auto-generated registry build" \
             dist/registry.json \
             dist/agent.schema.json \
             dist/registry.schema.json \
             dist/*.svg
-
-          # Delete old 'latest' tag and release
-          gh release delete latest --yes --cleanup-tag || true

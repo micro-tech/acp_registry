@@ -41,6 +41,7 @@ Each directory contains either `agent.json` (for agents) or `extension.json` (fo
 - `id`: lowercase, hyphens only, must match directory name
 - `version`: semantic versioning (e.g., `1.0.0`)
 - `distribution`: at least one of `binary`, `npx`, `uvx`
+- `binary` distribution: must include builds for all operating systems (darwin, linux, windows)
 - `icon.svg`: must be SVG format, 16x16, monochrome using `currentColor` (enables theming)
 - **URL validation**: All distribution URLs must be accessible (binary archives, npm/PyPI packages)
 
@@ -87,9 +88,9 @@ Run build to validate: `uv run --with jsonschema .github/workflows/build_registr
 
 ## Distribution Types
 
-- `binary`: Platform-specific archives (`darwin-aarch64`, `linux-x86_64`, etc.)
-- `npx`: npm packages
-- `uvx`: PyPI packages
+- `binary`: Platform-specific archives (`darwin-aarch64`, `linux-x86_64`, etc.). **Must support all operating systems** (darwin, linux, windows).
+- `npx`: npm packages (cross-platform by default)
+- `uvx`: PyPI packages (cross-platform by default)
 
 ## Icon Requirements
 
@@ -111,46 +112,12 @@ Using `currentColor` enables icons to adapt to different themes (light/dark mode
 - Hardcoded colors: `fill="#FF5500"`, `fill="red"`, `stroke="rgb(0,0,0)"`
 - Missing currentColor: `fill` or `stroke` without `currentColor`
 
-## Documentation Site
+## Authentication Validation
 
-The registry has a documentation site built with [Mintlify](https://mintlify.com/) in the `.docs/` folder.
+Agents must support ACP authentication. The CI verifies auth via `.github/workflows/verify_agents.py --auth-check`.
 
-### Structure
+**Requirements:**
+- Return `authMethods` array in `initialize` response
+- At least one method must have type `"agent"` or `"terminal"`
 
-```
-.docs/
-├── docs.json          # Mintlify configuration
-├── _index.mdx         # Template for index page (contains $$AGENTS_CARDS$$ placeholder)
-├── index.mdx          # Generated index page with agent cards
-├── registry.mdx       # Registry format documentation
-└── logo/              # Logo assets
-```
-
-### Commands
-
-```bash
-# Generate docs (regenerates index.mdx from template)
-uv run .github/workflows/generate_mintlify_agents.py
-
-# Run local dev server
-cd docs && npx mintlify dev --port 3000
-```
-
-### How It Works
-
-1. `_index.mdx` is a template containing `$$AGENTS_CARDS$$` placeholder
-2. `generate_mintlify_agents.py` reads all `agent.json` files from the registry
-3. Generates `<Card>` components for each agent with name, description, version, and icon
-4. Icons are inlined as sanitized SVG (converted to JSX-compatible attributes)
-5. Replaces placeholder and writes to `index.mdx`
-
-### Automation
-
-Docs are automatically regenerated when agent versions are updated:
-- The `update-versions.yml` workflow runs `generate_mintlify_agents.py` after applying updates
-- Changes to `.docs/index.mdx` are committed along with version updates
-
-### Adding New Pages
-
-1. Create new `.mdx` file in `.docs/`
-2. Add the page name (without extension) to `docs.json` navigation
+See [AUTHENTICATION.md](AUTHENTICATION.md) for details on implementing auth methods.

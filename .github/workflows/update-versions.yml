@@ -20,7 +20,6 @@ on:
 permissions:
   contents: write
   issues: write
-  actions: write
 
 jobs:
   check-versions:
@@ -127,6 +126,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Apply version updates
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -143,8 +147,9 @@ jobs:
           pip install jsonschema
           SKIP_URL_VALIDATION=1 python .github/workflows/build_registry.py
 
-      - name: Generate docs
-        run: python .github/workflows/generate_mintlify_agents.py
+      - name: Verify agent auth support
+        timeout-minutes: 15
+        run: python3 .github/workflows/verify_agents.py --auth-check
 
       - name: Generate commit message
         id: commit_msg
@@ -193,11 +198,6 @@ jobs:
           )"
           git push origin main
 
-      - name: Trigger registry build
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run build-registry.yml
-
   notify-apply-failure:
     needs: [check-versions, apply-updates]
     if: always() && needs.apply-updates.result == 'failure'
@@ -232,8 +232,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: title,
-                body: `The automated version update workflow failed while applying updates.\n\n**Run:** ${runUrl}\n\nThis could be due to:\n- Registry validation failure\n- Git push conflict\n- Network issues\n\nPlease investigate.`,
+                body: `The automated version update workflow failed while applying updates.\n\n**Run:** ${runUrl}\n\nThis could be due to:\n- Registry validation failure\n- Auth verification failure\n- Git push conflict\n- Network issues\n\nPlease investigate.`,
                 labels: ['version-update-failure', 'automated']
               });
             }
-
