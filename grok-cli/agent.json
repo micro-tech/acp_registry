@@ -29,8 +29,18 @@
     }
   },
   "distribution": {
-    "npm": {
-      "package": "grok-cli-acp"
+    "binary": {
+      "darwin-x86_64": {
+        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-macos-x86_64.zip"
+      },
+      "linux-x86_64": {
+        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-linux-x86_64.zip",
+        "cmd": "./codex-acp"
+      },
+      "windows-x86_64": {
+        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-windows-x86_64.zip",
+        "cmd": "./codex-acp.exe"
+      }
     }
   }
 }
