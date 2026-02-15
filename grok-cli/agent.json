@@ -18,6 +18,9 @@
     }
   ],
   "targets": {
+    "darwin-x86_64": {
+      "bin": "grok"
+    },
     "darwin-aarch64": {
       "bin": "grok"
     },
@@ -33,13 +36,14 @@
       "darwin-x86_64": {
         "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-macos-x86_64.zip"
       },
+      "darwin-aarch64": {
+        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-macos-aarch64.zip"
+      },
       "linux-x86_64": {
-        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-linux-x86_64.zip",
-        "cmd": "./codex-acp"
+        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-linux-x86_64.zip"
       },
       "windows-x86_64": {
-        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-windows-x86_64.zip",
-        "cmd": "./codex-acp.exe"
+        "archive": "https://github.com/micro-tech/grok-cli/releases/download/v0.1.4/grok-cli-windows-x86_64.zip"
       }
     }
   }
